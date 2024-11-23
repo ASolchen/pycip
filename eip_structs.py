@@ -53,59 +53,9 @@ class EIP_Header(Structure):
         ('options', c_uint32),
     ]
 
-class Send_RR_Data_Request(Structure):
+class Send_RR_Data(Structure):
     """
-    Send RR Data request structure with static fields.
-    Dynamically parses items using a helper method.
-    """
-    _pack_ = 1
-    _fields_ = [
-        ('interface_handle', c_uint32),  # Interface handle (4 bytes, 0 for CIP)
-        ('timeout', c_uint16),          # Timeout in ms
-        ('item_count', c_uint16),       # Number of items (typically 2)
-    ]
-
-    def __init__(self, data):
-        """
-        Initialize the structure and parse items.
-        :param data: The raw request bytes.
-        """
-        super().__init__()
-        memmove(addressof(self), data, sizeof(self))
-        # Dynamically parse the items
-        self.items = self._parse_items(data[sizeof(self):])
-        self.generate_response()
-
-    def _parse_items(self, items_data):
-        """
-        Parse the dynamic items and return a list of item objects.
-        :param items_data: The raw data containing the items.
-        :return: List of parsed item objects.
-        """
-        CIP_items = {
-            0x0000: NullAddressItem,
-            0x00B2: UnconnectedDataItem,
-            0x0000: SocketAddressInfo,
-
-        }
-        offset = 0
-        items = []
-        for _ in range(self.item_count):
-            # Parse item header (Type ID and Length)
-            item_type, item_length = struct.unpack_from('<HH', items_data, offset)
-            offset += sizeof(c_uint16)+sizeof(c_uint16) # Type Id and Length each 2 bytes
-            # Extract item data
-            item_data = items_data[offset:offset + item_length]
-            offset += item_length
-            if item_type not in CIP_items:
-                raise ValueError(f"Unsupported CIP Item: 0x{item_type:04X}")
-            items.append(CIP_items[item_type](item_data))
-        return items
-
-
-class Send_RR_Data_Response(Structure):
-    """
-    Represents the Send RR Data Response with dynamically determined items.
+    Represents the Send RR Data structure for requests and responses.
     """
     _pack_ = 1
     _fields_ = [
@@ -114,41 +64,68 @@ class Send_RR_Data_Response(Structure):
         ('item_count', c_uint16),       # Number of items
     ]
 
-    def __init__(self, request_items, cip_response_data, socket_info):
+    def __init__(self, data=None):
         """
-        Initialize the response based on the request items and other inputs.
-        :param request_items: Parsed items from the request.
-        :param cip_response_data: Data to include in the Unconnected Data Item.
-        :param socket_info: Data for the Socket Address Info Item.
+        Initialize the structure, optionally parsing data into items.
+        :param data: Raw data to parse (for requests), or None for empty response.
         """
         super().__init__()
-        self.interface_handle = 0  # Typically 0 for CIP
-        self.timeout = 0           # Typically 0
-        self.items = []
+        self.interface_handle = 0  # Default to 0
+        self.timeout = 0           # Default to 0
+        self.items = []            # Dynamic list of items
 
-        # Always include Null Address Item if present in request
-        if any(isinstance(item, NullAddressItem) for item in request_items):
-            self.items.append(NullAddressItem())
+        if data:
+            memmove(addressof(self), data[:sizeof(self)], sizeof(self))
+            self._parse_items(data)
 
-        # Add the Unconnected Data Item
-        self.items.append(UnconnectedDataItem(cip_response_data))
+    def _parse_items(self, data):
+        """
+        Parse items from raw data and populate self.items.
+        :param data: Raw data containing item information.
+        """
+        offset = sizeof(Send_RR_Data)  # Start after the fixed fields
+        for _ in range(self.item_count):
+            # Read item type and length
+            item_type, item_len = struct.unpack_from('<HH', data, offset)
+            offset += 4  # Advance past type and length
+            item_data = data[offset:offset + item_len]
+            offset += item_len
 
-        # Add the Socket Address Info Item if socket information is provided
-        if socket_info:
-            self.items.append(SocketAddressInfo(socket_info))
+            # Create the appropriate item and add it
+            self.add_item(self._create_item(item_type, item_data))
 
-        # Set the item count
-        self.item_count = len(self.items)
+    def _create_item(self, item_type, item_data):
+        """
+        Factory method to create item instances based on type.
+        :param item_type: Item type identifier.
+        :param item_data: Raw item data.
+        :return: An instance of the corresponding item class.
+        """
+        if item_type == 0x0000:  # Null Address Item
+            return NullAddressItem()
+        elif item_type == 0x00B2:  # Unconnected Data Item
+            return UnconnectedDataItem(item_data)
+        elif item_type == 0x8000:  # Socket Address Info Item
+            return SocketAddressInfo(item_data)
+        else:
+            raise ValueError(f"Unknown item type: 0x{item_type:04X}")
+
+    def add_item(self, item):
+        """
+        Add an item to the structure.
+        :param item: Instance of an item class (e.g., NullAddressItem).
+        """
+        self.items.append(item)
+        self.item_count = len(self.items)  # Update the item count dynamically
 
     def to_bytes(self):
         """
-        Convert the response to bytes.
+        Serialize the structure and its items into bytes.
+        :return: Serialized data as bytes.
         """
-        static_part = bytes(self)
-        dynamic_part = b''.join(item.to_bytes() for item in self.items)
-        return static_part + dynamic_part
-
-
+        base = bytes(self)  # Fixed fields
+        items_data = b''.join(item.to_bytes() for item in self.items)
+        return base + items_data
 
 
 

@@ -1,19 +1,20 @@
-from ctypes import *
-import socket
 import logging
-import binascii
-from eip_adapter import EIP_Adapter
+from adapter import Adapter
 
+def main():
+    # Configure logging
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Set up logging configuration
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-
-
-# Example usage:
-while True:
     try:
-        with EIP_Adapter(host='', tcp_port=44818) as adapter:
-            # This block will execute once a client connects
-            adapter.serve()
-    except ConnectionResetError:
-        logging.debug(f"Connection reset. Reopening...")
+        # Initialize and start the Adapter
+        adapter = Adapter(host='0.0.0.0', tcp_port=44818, udp_port=2222)
+        adapter.start_server()
+    except KeyboardInterrupt:
+        logging.info("Shutting down server...")
+    except Exception as e:
+        logging.error(f"Error: {e}")
+    finally:
+        adapter.close()
+
+if __name__ == "__main__":
+    main()
