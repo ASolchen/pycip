@@ -2,21 +2,27 @@ import logging
 import socket
 import threading
 import time
-from ctypes import sizeof, c_uint8
+from ctypes import c_uint16, sizeof, c_uint8
 from eip_structs import (
     EIP_Header,
     Send_RR_Data_Request,
     Send_RR_Data_Reply,
+    CIP_IO_Reply,
     parse_param_data,
 )
-from cip_service_structs import ForwardOpenRequest, ForwardOpenResponse, ForwardCloseData
+from cip_service_structs import (ForwardOpenRequest,
+                                 ForwardOpenResponse,
+                                 ForwardCloseData,
+                                 CIP_Response)
 
 
 class EIP_Adapter:
     def __init__(self, host='localhost', tcp_port=44818, udp_port=2222):
+        self.cip_io_data = (c_uint8 * 32)() # data back to PLC
         self.host = host
         self.tcp_port = tcp_port
         self.udp_port = udp_port
+        self.udp_sequence_counter = 1
         self.server_socket = None
         self.client_socket = None
         self.client_address = None
@@ -57,7 +63,7 @@ class EIP_Adapter:
     def handle_send_rr_data(self, data):
         """
         Handle the Send RR Data (0x6F) command.
-        Parse the request using the Send_RR_Data_Request structure and respond.
+        Parse the request and construct a valid response.
         """
         logging.info("Handling Send RR Data command.")
 
@@ -70,7 +76,7 @@ class EIP_Adapter:
         logging.debug(f"Parsed Send RR Data Request: {rr_request}")
 
         # Calculate the offset to the CIP data
-        cip_data_offset = 24 + sizeof(Send_RR_Data_Request)  # Start after fixed fields
+        cip_data_offset = 24 + sizeof(Send_RR_Data_Request)
         cip_data_offset += rr_request.item0_len  # Add Address Item length
         cip_data = data[cip_data_offset: cip_data_offset + rr_request.item1_len]
         logging.debug(f"Extracted CIP Data: {cip_data.hex()}")
@@ -89,23 +95,59 @@ class EIP_Adapter:
 
         # Dispatch to the appropriate CIP service handler
         handler = cip_service_handlers.get(service_code, self.unsupported_service)
-        cip_response_data = handler(cip_data, eip_header)  # Pass the EIP header to the handler
+
+        # Extract the fixed portion of the CIP response
+        fixed_cip_offset = 2  # Service Code (1) + Path Size (1)
+        path_size = cip_data[1] * 2  # Path size in bytes (Path Size * 2)
+        general_status_offset = fixed_cip_offset + path_size  # Path data ends
+        additional_status_offset = general_status_offset + 1  # General Status (1 byte)
+        additional_status_size = cip_data[general_status_offset] * 2  # Additional Status Size in bytes
+
+        # Extract service-specific data after additional status
+        service_specific_data_offset = additional_status_offset + additional_status_size
+        cip_service_response = handler(cip_data[service_specific_data_offset:], eip_header)
+
+        # Prepare the CIP response
+        cip_response = CIP_Response()
+        cip_response.service = service_code | 0x80  # Set the reply bit
+        cip_response.general_status = 0x00  # 0x00 = success
+        cip_response.additional_status_size = 0x00  # 0 words
+
+        cip_response_data = bytes(cip_response) + cip_data[fixed_cip_offset:service_specific_data_offset] + cip_service_response
+
+        # Align the CIP response to 16-bit boundary
+        cip_response_data = cip_response.align_to_word(cip_response_data)
+
+        # Build the Send RR Data Reply structure
+        send_rr_response = Send_RR_Data_Reply()
+        send_rr_response.interface_handle = rr_request.interface_handle
+        send_rr_response.timeout = rr_request.timeout
+        send_rr_response.item_count = 2  # Address Item + Data Item
+        send_rr_response.item0_type_id = 0x0000  # Null Address Item
+        send_rr_response.item0_len = 0x0000
+        send_rr_response.item1_type_id = 0x00B2  # Unconnected Data Item
+        send_rr_response.item1_len = len(cip_response_data)  # CIP Response Length
+
+        # Combine the Send RR Data reply and CIP response
+        command_response = bytes(send_rr_response) + cip_response_data
+        logging.debug(f"Constructed Command Response: {command_response.hex()}")
 
         # Build the EtherNet/IP header
         eip_response_header = EIP_Header()
         eip_response_header.cmd = 0x6F  # Send RR Data response
-        eip_response_header.len = len(cip_response_data)  # CIP payload length
+        eip_response_header.len = len(command_response)  # Total payload length
         eip_response_header.session_handle = eip_header.session_handle
         eip_response_header.status = 0x0000  # Success
         eip_response_header.sender_context = eip_header.sender_context  # Echo sender context
         eip_response_header.options = 0x0000  # Default options
 
-        # Combine the EIP header and CIP response data
-        full_response = bytes(eip_response_header) + cip_response_data
+        # Combine the EIP header and command response
+        full_response = bytes(eip_response_header) + command_response
+        logging.debug(f"Full Response: {full_response.hex()}")
 
         # Send the response back to the client
         self.send_data(full_response)
-        logging.debug(f"Sent Full Response: {full_response.hex()}")
+        logging.info(f"Sent Full Response to Client.")
 
 
     def unsupported_service(self, cip_data, eip_header):
@@ -150,22 +192,24 @@ class EIP_Adapter:
 
         # Prepare the Forward Open Response structure
         forward_open_response = ForwardOpenResponse()
-        forward_open_response.service = 0x54 | 0x80  # Response bit set
-        forward_open_response.status = 0x00  # General Status: Success
-        forward_open_response.additional_status_size = 0x00  # No additional status
-        forward_open_response.reserved = 0x00  # Reserved field
 
         # Populate response using request fields
         forward_open_response.o_t_connection_id = forward_open_request.o_t_connection_id
         forward_open_response.t_o_connection_id = forward_open_request.t_o_connection_id
+        forward_open_response.connection_serial_number = forward_open_request.connection_serial_number
+        forward_open_response.originator_vendor_id = forward_open_request.originator_vendor_id
+        forward_open_response.originator_serial_number = forward_open_request.originator_serial_number
         forward_open_response.o_t_rpi = forward_open_request.o_t_rpi
         forward_open_response.t_o_rpi = forward_open_request.t_o_rpi
-        forward_open_response.o_t_network_params = 0x0080  # Example default
-        forward_open_response.t_o_network_params = 0x0080  # Example default
-        forward_open_response.reserved_padding = (c_uint8 * 8)(*([0] * 8))  # Reserved padding
+        forward_open_response.application_reply_size = 0x00
 
+        logging.info(f"Setting up UDP connection with RPI: {forward_open_request.t_o_rpi} and Connection ID: {forward_open_request.t_o_connection_id}")
+        # Set up the UDP connection
+        self.setup_udp_connection(rpi = forward_open_request.t_o_rpi,
+                                  connection_id = forward_open_request.t_o_connection_id)
         # Convert the response structure to bytes
         cip_response = bytes(forward_open_response)
+
 
         logging.debug(f"Constructed Forward Open Response: {cip_response.hex()}")
 
@@ -301,7 +345,7 @@ class EIP_Adapter:
 
 
 
-    def setup_udp_connection(self, rpi):
+    def setup_udp_connection(self, rpi, connection_id):
         """Set up a UDP connection."""
         if self.udp_running:
             logging.warning("UDP connection already running.")
@@ -309,22 +353,47 @@ class EIP_Adapter:
 
         self.udp_running = True
         self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.udp_thread = threading.Thread(target=self._udp_sender, args=(rpi,), daemon=True)
+        self.udp_thread = threading.Thread(target=self._udp_sender, args=(rpi,connection_id), daemon=True)
         self.udp_thread.start()
         logging.info(f"UDP connection set up with RPI: {rpi} ms")
 
-    def _udp_sender(self, rpi):
+    def generate_udp_payload(self, connection_id):
+        """Generate the payload data for cyclic UDP transmission."""
+        cip_io_reply = CIP_IO_Reply()
+        cip_io_reply.item_count = 2
+        cip_io_reply.type1_id = 0x8002 # Seq Address Item
+        cip_io_reply.type1_len = 8
+        cip_io_reply.connection_id = connection_id
+        cip_io_reply.encap_seq_count = self.udp_sequence_counter
+        cip_io_reply.type2_id = 0x00b1 # Connected Data Item
+        cip_io_reply.type2_len = sizeof(c_uint16) + self.cip_io_data._length_
+
+
+        packet = bytes(cip_io_reply) + bytes(self.cip_io_data)
+        # Increment the sequence counter
+        self.udp_sequence_counter += 1
+        logging.debug(f"CIP I/O Send: {packet.hex()}")
+        return packet
+        
+
+    def _udp_sender(self, rpi, connection_id):
         """Send cyclic data over UDP at the RPI rate."""
         while self.udp_running:
             try:
-                # Example cyclic data (replace with actual data to send)
-                data = b'\x00' * 32
-                self.udp_socket.sendto(data, (self.client_address[0], self.udp_port))
-                logging.debug(f"Sent cyclic UDP data: {data.hex()}")
-                time.sleep(rpi / 1000.0)  # Convert milliseconds to seconds
+                # Generate dynamic payload data (replace this with actual I/O data)
+                udp_packet = self.generate_udp_payload(connection_id)
+                # Send the packet
+                self.udp_socket.sendto(udp_packet, (self.client_address[0], self.udp_port))
+                logging.debug(f"Sent cyclic UDP data: {udp_packet.hex()}")
+                # Sleep for the RPI (convert milliseconds to seconds)
+                time.sleep(rpi / 1000.0)
+
             except Exception as e:
                 logging.error(f"Error sending UDP data: {e}")
-                break
+                self.udp_running = False  # Stop the loop on error
+
+                raise e
+
 
     def stop_udp_connection(self):
         """Stop the UDP connection."""
