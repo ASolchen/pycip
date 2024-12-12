@@ -4,6 +4,7 @@ import threading
 import time
 from ctypes import c_uint8
 from ethernetip import EthernetIP
+from eip_structs import CIP_IO_Reply
 
 class Adapter:
     def __init__(self, host='localhost', tcp_port=44818, udp_port=2222):
@@ -16,8 +17,11 @@ class Adapter:
         self.udp_socket = None
         self.udp_thread = None
         self.udp_running = False
-        self.io_read_data = (c_uint8 * 32)()  # I/O Buffer to PLC 
+        self.io_read_data = (c_uint8 * 30)()  # I/O Buffer to PLC 
         self.io_write_data = (c_uint8 * 32)()  # I/O Buffer from PLC 
+        self.connection_id = None
+        self.remote_connection_id = None
+        self.cip_sequence_count = 1
         self.ethip = EthernetIP(self)  # Pass a reference of itself
 
     def start_server(self):
@@ -57,6 +61,7 @@ class Adapter:
             return
 
         self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.udp_socket.bind((self.host, self.udp_port))
         self.udp_running = True
         self.udp_thread = threading.Thread(target=self._udp_sender, args=(rpi,), daemon=True)
         self.udp_thread.start()
@@ -65,9 +70,13 @@ class Adapter:
         """Send cyclic data over UDP."""
         while self.udp_running:
             try:
-                data = bytes(self.io_read_data)
+                recv_data = self.udp_socket.recv(1024)
+                logging.debug(f"Recieved UDP data: {recv_data.hex()}")
+                data = CIP_IO_Reply(self.remote_connection_id,
+                                    self.cip_sequence_count, self.io_read_data).to_bytes()
                 self.udp_socket.sendto(data, (self.client_address[0], self.udp_port))
-                logging.debug(f"Sent UDP data: {data.hex()}")
+                #logging.debug(f"Sent UDP data: {data.hex()}")
+                self.cip_sequence_count = (1 + self.cip_sequence_count) & 0xFFFFFFF #roll over
                 time.sleep(rpi)
             except Exception as e:
                 logging.error(f"Error sending UDP data: {e}")

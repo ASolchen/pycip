@@ -92,20 +92,20 @@ class Send_RR_Data(Structure):
             offset += item_len
 
             # Create the appropriate item and add it
-            self.add_item(self._create_item(item_type, item_data))
+            self.add_item(self.create_item(item_type, item_data))
 
-    def _create_item(self, item_type, item_data):
+    def create_item(self, item_type, item_data=None):
         """
         Factory method to create item instances based on type.
         :param item_type: Item type identifier.
         :param item_data: Raw item data.
         :return: An instance of the corresponding item class.
         """
-        if item_type == 0x0000:  # Null Address Item
+        if item_type == NullAddressItem.type_code:  # Null Address Item
             return NullAddressItem()
-        elif item_type == 0x00B2:  # Unconnected Data Item
+        elif item_type == UnconnectedDataItem.type_code:  # Unconnected Data Item
             return UnconnectedDataItem(item_data)
-        elif item_type == 0x8000:  # Socket Address Info Item
+        elif item_type == SocketAddressInfo.type_code:  # Socket Address Info Item
             return SocketAddressInfo(item_data)
         else:
             raise ValueError(f"Unknown item type: 0x{item_type:04X}")
@@ -133,7 +133,7 @@ class CIP_IO_Reply(Structure):
     """Cyclic IO reply structure."""
     _pack_ = 1
     _fields_ = [
-        ('item_count', c_uint32),  # Item Count
+        ('item_count', c_uint16),  # Item Count
         ('type1_id', c_uint16),     # Type ID
         ('type1_len', c_uint16),      # Length of Data Item (CIP payload length)
         ('connection_id', c_uint32),
@@ -142,3 +142,19 @@ class CIP_IO_Reply(Structure):
         ('type2_len', c_uint16),      # Length of Data Item (CIP payload length)
         ('cip_seq_count', c_uint16)    
     ]
+
+    def __init__(self, connection_id, sequence, io_data) -> None:
+        self.item_count = 2
+        self.type1_id = 0x8002 #Sequenced Address Item
+        self.type1_len =  8
+        if connection_id:
+            self.connection_id = connection_id
+        self.encap_seq_count = sequence
+        
+        self.type2_id = 0x00b1 #Connected Data Item
+        self.type2_len =  len(io_data)
+        self.cip_seq_count = sequence & 0xFFFF
+        self.io_data = io_data
+
+    def to_bytes(self):
+        return bytes(self) + self.io_data

@@ -44,11 +44,14 @@ class CIP_Handler:
 
         # Create a Forward Open response
         fwd_open_resp = ForwardOpenResponse()
-        fwd_open_resp.o_t_connection_id = fwd_open_req.o_t_connection_id
-        fwd_open_resp.t_o_connection_id = fwd_open_req.t_o_connection_id
+        fwd_open_resp.o_t_connection_id = 0x23d013 #generate random?
+        fwd_open_resp.t_o_connection_id = fwd_open_req.t_o_connection_id 
         fwd_open_resp.t_o_rpi = fwd_open_req.t_o_rpi
         fwd_open_resp.o_t_rpi = fwd_open_req.o_t_rpi
         fwd_open_resp.connection_serial_number = fwd_open_req.connection_serial_number
+        fwd_open_resp.originator_vendor_id = fwd_open_req.originator_vendor_id
+        fwd_open_resp.originator_serial_number = fwd_open_req.originator_serial_number
+        fwd_open_resp.connection_to_multiplier = fwd_open_req.connection_to_multiplier
         unconnected_data_item = UnconnectedDataItem(fwd_open_resp.to_bytes())
 
         reply.add_item(unconnected_data_item)
@@ -61,6 +64,8 @@ class CIP_Handler:
         reply.add_item(socket_addr)
 
         # Setup UDP connection in the adapter (Should probably check if cyclic type?)
+        self.adapter.connection_id = fwd_open_resp.o_t_connection_id
+        self.adapter.remote_connection_id = fwd_open_resp.t_o_connection_id
         self.adapter.setup_udp(fwd_open_req.o_t_rpi/ 1000000.0)
         reply_data = reply.to_bytes()
         logging.debug(f"Parsed Forward Open Request: {reply_data.hex()}")
@@ -69,7 +74,8 @@ class CIP_Handler:
     def handle_forward_close(self, cip_message):
         """Handle Forward Close (0x4E)."""
         # Example: Return a basic success response
-        cip_response = CIP_Message(service=0x4E | 0x80)  # Set response bit
+        cip_response = CIP_Message()  # Set response bit
+        cip_response.service=0x4E | 0x80
         return cip_response.to_bytes()
 
     def handle_read_attribute_single(self, cip_message):
